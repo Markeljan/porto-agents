@@ -1,30 +1,155 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { formatEther } from "viem";
-import { useAccount, useBalance, useChainId, useSignMessage } from "wagmi";
+import {
+	type Address,
+	encodePacked,
+	formatEther,
+	keccak256,
+	parseEther,
+} from "viem";
+import { baseSepolia } from "viem/chains";
+import {
+	useAccount,
+	useBalance,
+	useChainId,
+	useSendTransaction,
+	useSwitchChain,
+	useWaitForTransactionReceipt,
+} from "wagmi";
 import { ConnectButton } from "@/components/connect-button";
+
+// Use Base Sepolia for testing
+const TARGET_CHAIN = baseSepolia;
 
 export default function Home() {
 	const { address, isConnected } = useAccount();
 	const chainId = useChainId();
-	const { data: balance } = useBalance({ address });
+	const { switchChain } = useSwitchChain();
 	const {
-		signMessage,
-		data: signature,
-		isPending: isSigning,
-		isSuccess: hasSigned,
-	} = useSignMessage();
-	const [message, setMessage] = useState("Hello from Porto Agents!");
+		sendTransaction,
+		data: txHash,
+		isPending: isSending,
+		error: sendError,
+	} = useSendTransaction();
+	const { isLoading: isConfirming, isSuccess: isConfirmed } =
+		useWaitForTransactionReceipt({
+			hash: txHash,
+		});
+
+	const [botToken, setBotToken] = useState("");
+	const [depositAmount, setDepositAmount] = useState("0.001");
+	const [derivedAddress, setDerivedAddress] = useState<Address | null>(null);
+	const [botInfo, setBotInfo] = useState<{
+		username?: string;
+		id?: number;
+	} | null>(null);
+	const [isValidatingBot, setIsValidatingBot] = useState(false);
 	const [mounted, setMounted] = useState(false);
 
 	useEffect(() => {
 		setMounted(true);
 	}, []);
 
-	const handleSignMessage = () => {
-		signMessage({ message });
+	// Derive Porto account address from wallet + bot token
+	const derivePortoAccount = (
+		walletAddress: string,
+		token: string,
+	): Address => {
+		// Create a deterministic address using keccak256
+		// In production, use proper key derivation or smart contract wallets
+		const hash = keccak256(
+			encodePacked(["address", "string"], [walletAddress as Address, token]),
+		);
+		// Take the last 20 bytes of the hash as the address
+		return `0x${hash.slice(-40)}` as Address;
 	};
+
+	// Validate bot token and get bot info
+	const validateBotToken = async () => {
+		if (!botToken || !address) return;
+
+		setIsValidatingBot(true);
+		try {
+			// First, register the webhook
+			const webhookResponse = await fetch(
+				`/api/bot/${botToken}?register=true`,
+				{
+					method: "GET",
+				},
+			);
+
+			if (webhookResponse.ok) {
+				const webhookData = await webhookResponse.json();
+				console.log("Webhook registered:", webhookData);
+
+				// Get bot info
+				const response = await fetch(`/api/bot/${botToken}`, {
+					method: "GET",
+				});
+
+				if (response.ok) {
+					const data = await response.json();
+					setBotInfo(data.botInfo);
+
+					// Derive the Porto account
+					const derived = derivePortoAccount(address, botToken);
+					setDerivedAddress(derived);
+
+					// Update the bot with wallet info
+					await fetch(`/api/bot/${botToken}`, {
+						method: "PUT",
+						headers: {
+							"Content-Type": "application/json",
+						},
+						body: JSON.stringify({
+							walletAddress: address,
+							derivedAddress: derived,
+						}),
+					});
+				} else {
+					alert("Invalid bot token. Please check and try again.");
+					setBotInfo(null);
+					setDerivedAddress(null);
+				}
+			} else {
+				alert("Failed to register webhook. Please check your bot token.");
+				setBotInfo(null);
+				setDerivedAddress(null);
+			}
+		} catch (error) {
+			console.error("Error validating bot:", error);
+			alert("Failed to validate bot token. Make sure it's correct.");
+		} finally {
+			setIsValidatingBot(false);
+		}
+	};
+
+	// Handle deposit
+	const handleDeposit = async () => {
+		if (!derivedAddress || !depositAmount || chainId !== TARGET_CHAIN.id) {
+			if (chainId !== TARGET_CHAIN.id) {
+				// Switch to the target chain
+				switchChain?.({ chainId: TARGET_CHAIN.id });
+			}
+			return;
+		}
+
+		try {
+			sendTransaction({
+				to: derivedAddress,
+				value: parseEther(depositAmount),
+			});
+		} catch (error) {
+			console.error("Error sending transaction:", error);
+		}
+	};
+
+	// Get balance of derived account
+	const { data: derivedBalance } = useBalance({
+		address: derivedAddress || undefined,
+		chainId: TARGET_CHAIN.id,
+	});
 
 	return (
 		<div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
@@ -49,148 +174,192 @@ export default function Home() {
 			<main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
 				<div className="text-center mb-12">
 					<h2 className="text-4xl font-bold text-gray-900 dark:text-white mb-4">
-						Welcome to Porto Agents
+						Telegram Bot Agent Creator
 					</h2>
 					<p className="text-lg text-gray-600 dark:text-gray-300">
-						Connect your wallet using Porto to interact with Web3
+						Fund your Telegram bot with ETH using Porto
 					</p>
 				</div>
 
 				{!mounted ? (
-					// Loading state - show a skeleton or spinner
+					// Loading state
 					<div className="text-center py-16">
 						<div className="inline-flex items-center justify-center w-20 h-20 bg-gray-100 dark:bg-gray-800 rounded-full mb-6 animate-pulse">
 							<div className="w-10 h-10 bg-gray-300 dark:bg-gray-600 rounded" />
 						</div>
-						<div className="h-8 w-64 bg-gray-200 dark:bg-gray-700 rounded mx-auto mb-2 animate-pulse" />
-						<div className="h-5 w-80 bg-gray-200 dark:bg-gray-700 rounded mx-auto mb-6 animate-pulse" />
 					</div>
 				) : isConnected ? (
-					<div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-						{/* Account Info Card */}
-						<div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6">
-							<h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
-								Account Information
-							</h3>
-							<div className="space-y-3">
-								<div className="flex justify-between">
-									<span className="text-gray-600 dark:text-gray-400">
-										Address:
-									</span>
-									<span className="font-mono text-sm text-gray-900 dark:text-white">
-										{address?.slice(0, 6)}...{address?.slice(-4)}
-									</span>
-								</div>
-								<div className="flex justify-between">
-									<span className="text-gray-600 dark:text-gray-400">
-										Chain ID:
-									</span>
-									<span className="text-gray-900 dark:text-white">
-										{chainId}
-									</span>
-								</div>
-								{balance && (
-									<div className="flex justify-between">
-										<span className="text-gray-600 dark:text-gray-400">
-											Balance:
-										</span>
-										<span className="text-gray-900 dark:text-white">
-											{parseFloat(formatEther(balance.value)).toFixed(6)}{" "}
-											{balance.symbol}
-										</span>
-									</div>
-								)}
-							</div>
-						</div>
-
-						{/* Sign Message Card */}
-						<div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6">
-							<h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
-								Sign Message
-							</h3>
-							<div className="space-y-4">
-								<div>
-									<label
-										htmlFor="message"
-										className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
-									>
-										Message to sign:
-									</label>
-									<textarea
-										id="message"
-										value={message}
-										onChange={(e) => setMessage(e.target.value)}
-										className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-										rows={3}
-									/>
-								</div>
+					<div className="max-w-2xl mx-auto space-y-6">
+						{/* Chain Warning */}
+						{chainId !== TARGET_CHAIN.id && (
+							<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4">
+								<p className="text-yellow-800 dark:text-yellow-200">
+									⚠️ Please switch to {TARGET_CHAIN.name} to continue
+								</p>
 								<button
 									type="button"
-									onClick={handleSignMessage}
-									disabled={isSigning || !message}
-									className="w-full px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors font-medium"
+									onClick={() => switchChain?.({ chainId: TARGET_CHAIN.id })}
+									className="mt-2 px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700"
 								>
-									{isSigning ? "Signing..." : "Sign Message"}
+									Switch Network
 								</button>
-								{hasSigned && signature && (
-									<div className="mt-4 p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
-										<p className="text-sm font-medium text-green-800 dark:text-green-300 mb-1">
-											Message signed successfully!
+							</div>
+						)}
+
+						{/* Bot Setup Card */}
+						<div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6">
+							<h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
+								Setup Your Telegram Bot
+							</h3>
+
+							<div className="space-y-4">
+								{/* Bot Token Input */}
+								<div>
+									<label
+										htmlFor="bot-token"
+										className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
+									>
+										Telegram Bot Token:
+									</label>
+									<div className="flex gap-2">
+										<input
+											id="bot-token"
+											type="text"
+											value={botToken}
+											onChange={(e) => setBotToken(e.target.value)}
+											placeholder="Enter your bot token from @BotFather"
+											className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+										/>
+										<button
+											type="button"
+											onClick={validateBotToken}
+											disabled={!botToken || isValidatingBot}
+											className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:bg-gray-300"
+										>
+											{isValidatingBot ? "Validating..." : "Validate"}
+										</button>
+									</div>
+									<p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+										Get a bot token from @BotFather on Telegram
+									</p>
+								</div>
+
+								{/* Bot Info */}
+								{botInfo && (
+									<div className="p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
+										<p className="text-sm font-medium text-green-800 dark:text-green-300">
+											✅ Bot validated: @{botInfo.username}
 										</p>
-										<p className="text-xs font-mono text-gray-600 dark:text-gray-400 break-all">
-											{signature.slice(0, 20)}...{signature.slice(-20)}
+									</div>
+								)}
+
+								{/* Derived Address */}
+								{derivedAddress && (
+									<div>
+										<p className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+											Bot's Porto Account:
+										</p>
+										<div className="p-3 bg-gray-50 dark:bg-gray-900 rounded-lg">
+											<p className="font-mono text-sm break-all">
+												{derivedAddress}
+											</p>
+											<p className="text-xs text-gray-500 mt-1">
+												Balance:{" "}
+												{derivedBalance
+													? formatEther(derivedBalance.value)
+													: "0"}{" "}
+												ETH
+											</p>
+										</div>
+									</div>
+								)}
+
+								{/* Deposit Amount */}
+								{derivedAddress && (
+									<div>
+										<label
+											htmlFor="deposit-amount"
+											className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
+										>
+											Deposit Amount (ETH):
+										</label>
+										<input
+											id="deposit-amount"
+											type="number"
+											value={depositAmount}
+											onChange={(e) => setDepositAmount(e.target.value)}
+											step="0.001"
+											min="0"
+											className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+										/>
+									</div>
+								)}
+
+								{/* Send Transaction Button */}
+								{derivedAddress && (
+									<button
+										type="button"
+										onClick={handleDeposit}
+										disabled={
+											isSending ||
+											isConfirming ||
+											!depositAmount ||
+											Number(depositAmount) <= 0
+										}
+										className="w-full px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:bg-gray-300 font-medium"
+									>
+										{isSending
+											? "Sending..."
+											: isConfirming
+												? "Confirming..."
+												: `Send ${depositAmount} ETH to Bot`}
+									</button>
+								)}
+
+								{/* Transaction Status */}
+								{txHash && (
+									<div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+										<p className="text-sm font-medium text-blue-800 dark:text-blue-300 mb-1">
+											Transaction {isConfirmed ? "Confirmed" : "Pending"}
+										</p>
+										<a
+											href={`${TARGET_CHAIN.blockExplorers?.default.url}/tx/${txHash}`}
+											target="_blank"
+											rel="noopener noreferrer"
+											className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+										>
+											View on Explorer →
+										</a>
+									</div>
+								)}
+
+								{/* Send Error */}
+								{sendError && (
+									<div className="p-3 bg-red-50 dark:bg-red-900/20 rounded-lg">
+										<p className="text-sm text-red-800 dark:text-red-300">
+											Error: {sendError.message}
 										</p>
 									</div>
 								)}
 							</div>
 						</div>
 
-						{/* Capabilities Card */}
-						<div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 md:col-span-2">
-							<h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
-								Porto Capabilities
-							</h3>
-							<div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-								{[
-									{
-										title: "Multi-Chain Support",
-										description: "Connect to multiple networks seamlessly",
-									},
-									{
-										title: "Secure Signing",
-										description: "Sign messages and transactions safely",
-									},
-									{
-										title: "Account Management",
-										description: "Manage multiple accounts with ease",
-									},
-									{
-										title: "DApp Integration",
-										description: "Integrate with decentralized applications",
-									},
-									{
-										title: "ENS Support",
-										description: "Resolve ENS names automatically",
-									},
-									{
-										title: "Real-time Updates",
-										description: "Get live balance and network updates",
-									},
-								].map((feature) => (
-									<div
-										key={feature.title}
-										className="p-4 border border-gray-200 dark:border-gray-700 rounded-lg"
-									>
-										<h4 className="font-semibold text-gray-900 dark:text-white mb-1">
-											{feature.title}
-										</h4>
-										<p className="text-sm text-gray-600 dark:text-gray-400">
-											{feature.description}
-										</p>
-									</div>
-								))}
+						{/* Instructions */}
+						{botInfo && derivedAddress && (
+							<div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6">
+								<h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
+									How to Use Your Bot
+								</h3>
+								<ol className="space-y-2 text-gray-700 dark:text-gray-300">
+									<li>
+										1. Send ETH to your bot's Porto account using the form above
+									</li>
+									<li>2. Open Telegram and search for @{botInfo.username}</li>
+									<li>3. Start a conversation with /start or say "balance"</li>
+									<li>4. Your bot will respond with its current ETH balance</li>
+								</ol>
 							</div>
-						</div>
+						)}
 					</div>
 				) : (
 					<div className="text-center py-16">
@@ -201,7 +370,6 @@ export default function Home() {
 								stroke="currentColor"
 								viewBox="0 0 24 24"
 								aria-label="Wallet icon"
-								role="img"
 							>
 								<title>Wallet icon</title>
 								<path
